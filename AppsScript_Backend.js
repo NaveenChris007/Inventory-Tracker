@@ -18,6 +18,7 @@ const SHEET_PRODUCTS = 'Products';
 const SHEET_SALESPERSONS = 'Salespersons';
 const SHEET_SALES = 'Sales';
 const SHEET_STOCK_IN = 'Stock In';
+const SHEET_CUSTOMERS = 'Customers';
 
 // Data starts at row 5 in all sheets (row 4 = headers)
 const DATA_START_ROW = 5;
@@ -51,11 +52,17 @@ function doGet(e) {
 
   try {
     switch (action) {
+      case 'getInitialData':
+        result = getInitialData();
+        break;
       case 'getProducts':
         result = getProducts();
         break;
       case 'getSalespersons':
         result = getSalespersons();
+        break;
+      case 'getCustomers':
+        result = getCustomers();
         break;
       case 'getDashboard':
         result = getDashboard();
@@ -91,6 +98,9 @@ function doPost(e) {
       case 'submitStockIn':
         result = submitStockIn(data);
         break;
+      case 'addCustomer':
+        result = addCustomer(data);
+        break;
       default:
         result = { error: 'Unknown action: ' + action };
     }
@@ -103,6 +113,16 @@ function doPost(e) {
     .setMimeType(ContentService.MimeType.JSON);
 
   return output;
+}
+
+// ── GET INITIAL DATA (Batched) ──
+// Returns products, salespersons, and customers in a single call
+function getInitialData() {
+  return {
+    products: getProducts().products || [],
+    salespersons: getSalespersons().salespersons || [],
+    customers: getCustomers().customers || []
+  };
 }
 
 // ── GET PRODUCTS ──
@@ -151,6 +171,86 @@ function getSalespersons() {
   return { salespersons };
 }
 
+// ── GET CUSTOMERS ──
+function getCustomers() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_CUSTOMERS);
+
+  if (!sheet) {
+    // If Customers sheet doesn't exist yet, return empty array
+    return { customers: [] };
+  }
+
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < DATA_START_ROW) return { customers: [] };
+
+  const data = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 4).getValues();
+
+  const customers = data
+    .filter(row => row[0] !== '' && row[3] === 'Active')
+    .map(row => ({
+      id: row[0],           // Customer ID
+      name: row[1],         // Customer Name
+      contactPerson: row[2], // Contact Person
+    }));
+
+  return { customers };
+}
+
+// ── ADD CUSTOMER ──
+// Expects: { name, contactPerson }
+function addCustomer(data) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(SHEET_CUSTOMERS);
+
+    // If Customers sheet doesn't exist, create it
+    if (!sheet) {
+      sheet = ss.insertSheet(SHEET_CUSTOMERS);
+      // Add headers
+      sheet.getRange(4, 1, 1, 4).setValues([['Customer ID', 'Customer Name', 'Contact Person', 'Status (Active/Inactive)']]);
+      sheet.getRange(4, 1, 1, 4).setFontWeight('bold');
+    }
+
+    // Check if customer already exists
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= DATA_START_ROW) {
+      const existingCustomers = sheet.getRange(DATA_START_ROW, 2, lastRow - DATA_START_ROW + 1, 1).getValues();
+      const isDuplicate = existingCustomers.some(row => row[0] && row[0].toString().toLowerCase() === data.name.toLowerCase());
+      if (isDuplicate) {
+        return { error: 'Customer "' + data.name + '" already exists' };
+      }
+    }
+
+    // Generate customer ID (CUST-001, CUST-002, etc.)
+    const customerCount = lastRow < DATA_START_ROW ? 0 : lastRow - DATA_START_ROW + 1;
+    const customerId = 'CUST-' + String(customerCount + 1).padStart(3, '0');
+
+    // Add new customer
+    const newRow = [
+      customerId,
+      data.name,
+      data.contactPerson || '',
+      'Active'
+    ];
+
+    const startRow = lastRow < DATA_START_ROW ? DATA_START_ROW : lastRow + 1;
+    sheet.getRange(startRow, 1, 1, 4).setValues([newRow]);
+
+    return {
+      success: true,
+      customer: {
+        id: customerId,
+        name: data.name,
+        contactPerson: data.contactPerson || ''
+      }
+    };
+  } catch (error) {
+    return { error: 'Failed to add customer: ' + error.toString() };
+  }
+}
+
 // ── SUBMIT SALE ──
 // Expects: { invoiceNo, date, customer, salesperson, items: [{ productId, productName, qty, unitPrice }], remarks }
 function submitSale(data) {
@@ -160,6 +260,16 @@ function submitSale(data) {
 
     if (!sheet) {
       return { error: 'Sales sheet not found. Expected sheet name: "' + SHEET_SALES + '"' };
+    }
+
+    // Check for duplicate invoice number
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= DATA_START_ROW) {
+      const invoiceNumbers = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 1).getValues();
+      const isDuplicate = invoiceNumbers.some(row => row[0] === data.invoiceNo);
+      if (isDuplicate) {
+        return { error: 'Invoice number "' + data.invoiceNo + '" already exists. Please use a different invoice number.' };
+      }
     }
 
     const entryTime = new Date();
@@ -181,7 +291,6 @@ function submitSale(data) {
 
     if (rows.length === 0) return { error: 'No items to submit' };
 
-    const lastRow = sheet.getLastRow();
     const startRow = lastRow + 1;
 
     sheet.getRange(startRow, 1, rows.length, 11).setValues(rows);
@@ -304,6 +413,34 @@ function getDashboard() {
   const uniqueInvoices = [...new Set(sales.filter(r => r[0] !== '').map(r => r[0]))].length;
   const lowStockCount = dashboard.filter(p => p.status === 'LOW').length;
 
+  // Customer stats
+  const customerStats = {};
+  sales.forEach(row => {
+    const customer = row[2]; // Customer column
+    if (!customer || customer === '') return;
+
+    if (!customerStats[customer]) {
+      customerStats[customer] = {
+        name: customer,
+        totalPurchases: 0,
+        invoiceCount: 0,
+        invoices: new Set()
+      };
+    }
+
+    customerStats[customer].totalPurchases += (row[8] || 0); // Line Total
+    customerStats[customer].invoices.add(row[0]); // Invoice No
+  });
+
+  const topCustomers = Object.values(customerStats)
+    .map(c => ({
+      name: c.name,
+      totalPurchases: c.totalPurchases,
+      invoiceCount: c.invoices.size
+    }))
+    .sort((a, b) => b.totalPurchases - a.totalPurchases)
+    .slice(0, 10);
+
   return {
     items: dashboard,
     kpi: {
@@ -313,7 +450,8 @@ function getDashboard() {
       totalRevenue,
       totalInvoices: uniqueInvoices,
       inventoryValue: dashboard.reduce((sum, p) => sum + (p.onHand * p.unitCost), 0)
-    }
+    },
+    topCustomers
   };
 }
 

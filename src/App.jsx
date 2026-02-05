@@ -14,6 +14,7 @@ const Icons = {
   box: <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><path d="M3.27 6.96L12 12.01l8.73-5.05M12 22.08V12"/></svg>,
   chevDown: <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>,
   x: <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>,
+  edit: <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
 };
 
 // ── STYLES ──
@@ -641,6 +642,87 @@ function Select({ label, value, options, onChange, placeholder, displayKey = "la
   );
 }
 
+// ── COMBOBOX (Searchable with Add New option) ──
+function ComboBox({ label, value, options, onChange, placeholder, apiUrl, onCustomerAdded }) {
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const searchValue = value || "";
+  const filtered = options.filter(o =>
+    (o.name || "").toLowerCase().includes(searchValue.toLowerCase()) ||
+    (o.id || "").toString().toLowerCase().includes(searchValue.toLowerCase())
+  );
+
+  const handleSelect = (customer) => {
+    onChange(customer.name);
+    setOpen(false);
+  };
+
+  const handleInputChange = (e) => {
+    onChange(e.target.value);
+    if (!open) setOpen(true);
+  };
+
+  const handleAddNew = async () => {
+    if (!searchValue.trim()) return;
+
+    setAdding(true);
+    try {
+      const res = await api.post(apiUrl, "addCustomer", { name: searchValue.trim() });
+      if (res.error) {
+        alert(res.error);
+      } else {
+        onChange(searchValue.trim());
+        setOpen(false);
+        if (onCustomerAdded) onCustomerAdded(res.customer);
+      }
+    } catch (err) {
+      alert("Failed to add customer: " + err.message);
+    }
+    setAdding(false);
+  };
+
+  return (
+    <div className="field">
+      {label && <label>{label}</label>}
+      <div className="custom-select" ref={ref}>
+        <input
+          type="text"
+          value={searchValue}
+          onChange={handleInputChange}
+          onFocus={() => setOpen(true)}
+          placeholder={placeholder || "Type or select..."}
+          style={{ width: '100%', padding: '10px 12px', border: '0.5px solid var(--border-strong)', borderRadius: 'var(--radius-sm)', fontSize: '14px', outline: 'none' }}
+        />
+        {open && (filtered.length > 0 || searchValue) && (
+          <div className="custom-select-dropdown">
+            {filtered.map((o, i) => (
+              <div key={i} className="custom-select-option" onClick={() => handleSelect(o)}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+                  <span>{o.name}</span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{o.id}</span>
+                </div>
+              </div>
+            ))}
+            {searchValue && filtered.length === 0 && (
+              <div className="custom-select-option" onClick={handleAddNew} style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                {adding ? "Adding..." : <>{Icons.plus} Add "{searchValue}" as new customer</>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── TOAST ──
 function Toast({ message, type, onClose }) {
   useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
@@ -703,7 +785,7 @@ const api = {
 };
 
 // ── SALES ENTRY VIEW ──
-function SalesEntry({ apiUrl, products, salespersons, onSubmitSuccess, showToast }) {
+function SalesEntry({ apiUrl, products, salespersons, customers, onSubmitSuccess, showToast, onCustomerAdded }) {
   const [salesperson, setSalesperson] = useState("");
   const [invoiceNo, setInvoiceNo] = useState("");
   const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
@@ -764,10 +846,18 @@ function SalesEntry({ apiUrl, products, salespersons, onSubmitSuccess, showToast
           <label>Invoice Date · {formatDate(date)}</label>
           <input type="date" value={date} onChange={e => setDate(e.target.value)} />
         </div>
-        <div className="field">
-          <label>Customer</label>
-          <input value={customer} onChange={e => setCustomer(e.target.value)} placeholder="Company name" />
-        </div>
+        <ComboBox
+          label="Customer"
+          value={customer}
+          onChange={setCustomer}
+          options={customers}
+          placeholder="Type or select customer..."
+          apiUrl={apiUrl}
+          onCustomerAdded={(newCustomer) => {
+            showToast(`Customer "${newCustomer.name}" added (${newCustomer.id})`, "success");
+            if (onCustomerAdded) onCustomerAdded(newCustomer);
+          }}
+        />
       </div>
 
       <div className="card">
@@ -890,9 +980,10 @@ function AddItemSheet({ products, onAdd, onClose, existingItems }) {
 }
 
 // ── DASHBOARD VIEW ──
-function Dashboard({ apiUrl, showToast }) {
+function Dashboard({ apiUrl, showToast, active }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -900,19 +991,23 @@ function Dashboard({ apiUrl, showToast }) {
       const res = await api.get(apiUrl, "getDashboard");
       if (res.error) throw new Error(res.error);
       setData(res);
+      setHasLoaded(true);
     } catch (err) {
       showToast("Failed to load dashboard: " + err.message, "error");
     }
     setLoading(false);
   }, [apiUrl, showToast]);
 
-  useEffect(() => { if (apiUrl) load(); }, [apiUrl, load]);
+  // Only load when tab becomes active for the first time
+  useEffect(() => {
+    if (apiUrl && active && !hasLoaded) load();
+  }, [apiUrl, active, hasLoaded, load]);
 
   if (!apiUrl) return <div className="empty-state"><p>Set your API URL in Settings first</p></div>;
   if (loading) return <div className="empty-state"><div className="spinner" style={{ margin: "0 auto", borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} /></div>;
   if (!data) return null;
 
-  const { kpi, items } = data;
+  const { kpi, items, topCustomers } = data;
   const lowItems = items.filter(i => i.status === "LOW");
   const okItems = items.filter(i => i.status === "OK");
   const sorted = [...lowItems, ...okItems];
@@ -938,6 +1033,23 @@ function Dashboard({ apiUrl, showToast }) {
         </div>
       </div>
 
+      {topCustomers && topCustomers.length > 0 && (
+        <div className="card">
+          <div className="card-title">Top Customers</div>
+          {topCustomers.map((customer, idx) => (
+            <div key={idx} className="stock-row">
+              <div className="stock-name">
+                {customer.name}
+                <span>{customer.invoiceCount} {customer.invoiceCount === 1 ? 'invoice' : 'invoices'}</span>
+              </div>
+              <div className="stock-qty" style={{ fontFamily: 'var(--mono)', fontSize: '13px', color: 'var(--success)' }}>
+                {formatCurrency(customer.totalPurchases)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="card">
         <div className="card-title">Stock Levels ({items.length} products)</div>
         {sorted.map(item => (
@@ -960,30 +1072,96 @@ function Dashboard({ apiUrl, showToast }) {
 }
 
 // ── HISTORY VIEW ──
-function History({ apiUrl, showToast, refreshKey }) {
+function History({ apiUrl, showToast, refreshKey, active }) {
   const [sales, setSales] = useState([]);
+  const [allSales, setAllSales] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.get(apiUrl, "getRecentSales");
       if (res.error) throw new Error(res.error);
+      setAllSales(res.sales || []);
       setSales(res.sales || []);
+      setHasLoaded(true);
     } catch (err) {
       showToast("Failed to load history: " + err.message, "error");
     }
     setLoading(false);
   }, [apiUrl, showToast]);
 
-  useEffect(() => { if (apiUrl) load(); }, [apiUrl, load, refreshKey]);
+  // Load when tab becomes active or when refreshKey changes
+  useEffect(() => {
+    if (apiUrl && active && (!hasLoaded || refreshKey > 0)) load();
+  }, [apiUrl, active, hasLoaded, refreshKey, load]);
+
+  // Filter sales based on date range and search
+  useEffect(() => {
+    let filtered = [...allSales];
+
+    // Date filtering
+    if (startDate) {
+      filtered = filtered.filter(inv => inv.date >= startDate);
+    }
+    if (endDate) {
+      filtered = filtered.filter(inv => inv.date <= endDate);
+    }
+
+    // Search filtering
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter(inv =>
+        inv.invoiceNo.toLowerCase().includes(query) ||
+        inv.customer.toLowerCase().includes(query) ||
+        inv.salesperson.toLowerCase().includes(query)
+      );
+    }
+
+    setSales(filtered);
+  }, [startDate, endDate, searchQuery, allSales]);
 
   if (!apiUrl) return <div className="empty-state"><p>Set your API URL in Settings first</p></div>;
   if (loading) return <div className="empty-state"><div className="spinner" style={{ margin: "0 auto", borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} /></div>;
 
   return (
     <>
-      {sales.length === 0 && <div className="empty-state"><p>No sales recorded yet</p></div>}
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="card-title">Filter & Search</div>
+        <div className="field">
+          <label>Search</label>
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Invoice, customer, or salesperson..."
+          />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>Start Date</label>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>End Date</label>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} />
+          </div>
+        </div>
+        {(startDate || endDate || searchQuery) && (
+          <button
+            className="btn btn-secondary"
+            style={{ marginTop: 12 }}
+            onClick={() => { setStartDate(""); setEndDate(""); setSearchQuery(""); }}
+          >
+            Clear Filters
+          </button>
+        )}
+      </div>
+
+      {sales.length === 0 && <div className="empty-state"><p>No sales found</p></div>}
       {sales.map(inv => (
         <div key={inv.invoiceNo} className="invoice-card">
           <div className="invoice-header">
@@ -1015,6 +1193,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [products, setProducts] = useState([]);
   const [salespersons, setSalespersons] = useState([]);
+  const [customers, setCustomers] = useState([]);
   const [toast, setToast] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -1022,11 +1201,12 @@ export default function App() {
 
   const testConnection = async (url) => {
     try {
-      const res = await api.get(url, "getProducts");
+      // Single batched API call instead of 3 separate calls
+      const res = await api.get(url, "getInitialData");
       if (res.error) throw new Error(res.error);
       setProducts(res.products || []);
-      const spRes = await api.get(url, "getSalespersons");
-      setSalespersons(spRes.salespersons || []);
+      setSalespersons(res.salespersons || []);
+      setCustomers(res.customers || []);
       setConnected(true);
     } catch (err) {
       setConnected(false);
@@ -1062,8 +1242,17 @@ export default function App() {
         <div className="content">
           {tab === "sales" && (
             connected ? (
-              <SalesEntry apiUrl={apiUrl} products={products} salespersons={salespersons}
-                onSubmitSuccess={() => setRefreshKey(k => k + 1)} showToast={showToast} />
+              <SalesEntry
+                apiUrl={apiUrl}
+                products={products}
+                salespersons={salespersons}
+                customers={customers}
+                onSubmitSuccess={() => setRefreshKey(k => k + 1)}
+                showToast={showToast}
+                onCustomerAdded={(newCustomer) => {
+                  setCustomers(prev => [...prev, newCustomer]);
+                }}
+              />
             ) : (
               <div className="empty-state">
                 <div className="icon">⚙️</div>
@@ -1071,8 +1260,8 @@ export default function App() {
               </div>
             )
           )}
-          {tab === "dashboard" && <Dashboard apiUrl={apiUrl} showToast={showToast} />}
-          {tab === "history" && <History apiUrl={apiUrl} showToast={showToast} refreshKey={refreshKey} />}
+          {tab === "dashboard" && <Dashboard apiUrl={apiUrl} showToast={showToast} active={tab === "dashboard"} />}
+          {tab === "history" && <History apiUrl={apiUrl} showToast={showToast} refreshKey={refreshKey} active={tab === "history"} />}
         </div>
 
         <div className="bottom-nav">
