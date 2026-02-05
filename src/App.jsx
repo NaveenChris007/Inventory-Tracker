@@ -643,7 +643,7 @@ function Select({ label, value, options, onChange, placeholder, displayKey = "la
 }
 
 // ── COMBOBOX (Searchable with Add New option) ──
-function ComboBox({ label, value, options, onChange, placeholder, apiUrl, onCustomerAdded }) {
+function ComboBox({ label, value, options, onChange, placeholder, apiUrl, onCustomerAdded, contactPerson }) {
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const ref = useRef(null);
@@ -675,7 +675,10 @@ function ComboBox({ label, value, options, onChange, placeholder, apiUrl, onCust
 
     setAdding(true);
     try {
-      const res = await api.post(apiUrl, "addCustomer", { name: searchValue.trim() });
+      const res = await api.post(apiUrl, "addCustomer", {
+        name: searchValue.trim(),
+        contactPerson: contactPerson || ''
+      });
       if (res.error) {
         alert(res.error);
       } else {
@@ -853,6 +856,7 @@ function SalesEntry({ apiUrl, products, salespersons, customers, onSubmitSuccess
           options={customers}
           placeholder="Type or select customer..."
           apiUrl={apiUrl}
+          contactPerson={salesperson}
           onCustomerAdded={(newCustomer) => {
             showToast(`Customer "${newCustomer.name}" added (${newCustomer.id})`, "success");
             if (onCustomerAdded) onCustomerAdded(newCustomer);
