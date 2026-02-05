@@ -1,0 +1,361 @@
+// ============================================================
+// INVENTORY TRACKER — Google Apps Script Backend
+// ============================================================
+// SETUP:
+// 1. Open your Google Sheet (the Inventory Tracker)
+// 2. Go to Extensions → Apps Script
+// 3. Delete any existing code, paste this entire file
+// 4. Click Deploy → New Deployment
+// 5. Type: Web app
+// 6. Execute as: Me
+// 7. Who has access: Anyone
+// 8. Click Deploy, copy the URL
+// 9. Paste that URL into the mobile app Settings page
+// ============================================================
+
+// Sheet names (must match your spreadsheet tabs exactly)
+const SHEET_PRODUCTS = 'Products';
+const SHEET_SALESPERSONS = 'Salespersons';
+const SHEET_SALES = 'Sales';
+const SHEET_STOCK_IN = 'Stock In';
+
+// Data starts at row 5 in all sheets (row 4 = headers)
+const DATA_START_ROW = 5;
+
+// Test function to verify permissions and sheet access
+function testSubmitSale() {
+  const testData = {
+    invoiceNo: 'TEST-001',
+    date: '2026-02-06',
+    customer: 'Test Customer',
+    salesperson: 'Test User',
+    items: [
+      {
+        productId: 'P001',
+        productName: 'Test Product',
+        qty: 1,
+        unitPrice: 10.00
+      }
+    ],
+    remarks: 'Test submission from Apps Script'
+  };
+
+  const result = submitSale(testData);
+  Logger.log(result);
+  return result;
+}
+
+function doGet(e) {
+  const action = e.parameter.action;
+  let result;
+
+  try {
+    switch (action) {
+      case 'getProducts':
+        result = getProducts();
+        break;
+      case 'getSalespersons':
+        result = getSalespersons();
+        break;
+      case 'getDashboard':
+        result = getDashboard();
+        break;
+      case 'getRecentSales':
+        result = getRecentSales();
+        break;
+      default:
+        result = { error: 'Unknown action: ' + action };
+    }
+  } catch (err) {
+    result = { error: err.toString() };
+  }
+
+  const output = ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+
+  return output;
+}
+
+function doPost(e) {
+  const action = e.parameter.action;
+  let result;
+
+  try {
+    const data = JSON.parse(e.postData.contents);
+
+    switch (action) {
+      case 'submitSale':
+        result = submitSale(data);
+        break;
+      case 'submitStockIn':
+        result = submitStockIn(data);
+        break;
+      default:
+        result = { error: 'Unknown action: ' + action };
+    }
+  } catch (err) {
+    result = { error: err.toString() };
+  }
+
+  const output = ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+
+  return output;
+}
+
+// ── GET PRODUCTS ──
+function getProducts() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_PRODUCTS);
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < DATA_START_ROW) return { products: [] };
+
+  const data = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 9).getValues();
+
+  const products = data
+    .filter(row => row[0] !== '' && row[8] !== 'No') // Skip empty and inactive
+    .map(row => ({
+      id: row[0],         // Product ID
+      name: row[1],       // Product Name
+      sku: row[2],        // SKU
+      category: row[3],   // Category
+      unit: row[4],       // Unit
+      unitCost: row[5],   // Unit Cost
+      sellingPrice: row[6], // Selling Price
+      reorderLevel: row[7], // Reorder Level
+    }));
+
+  return { products };
+}
+
+// ── GET SALESPERSONS ──
+function getSalespersons() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_SALESPERSONS);
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < DATA_START_ROW) return { salespersons: [] };
+
+  const data = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 3).getValues();
+
+  const salespersons = data
+    .filter(row => row[0] !== '' && row[2] === 'Active')
+    .map(row => ({
+      name: row[0],
+      role: row[1],
+    }));
+
+  return { salespersons };
+}
+
+// ── SUBMIT SALE ──
+// Expects: { invoiceNo, date, customer, salesperson, items: [{ productId, productName, qty, unitPrice }], remarks }
+function submitSale(data) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_SALES);
+
+    if (!sheet) {
+      return { error: 'Sales sheet not found. Expected sheet name: "' + SHEET_SALES + '"' };
+    }
+
+    const entryTime = new Date();
+    const entryTimeStr = Utilities.formatDate(entryTime, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+
+    const rows = data.items.map(item => [
+      data.invoiceNo,
+      new Date(data.date),
+      data.customer,
+      data.salesperson,
+      item.productId,
+      item.productName,
+      item.qty,
+      item.unitPrice,
+      item.qty * item.unitPrice, // Line Total
+      entryTimeStr,
+      data.remarks || ''
+    ]);
+
+    if (rows.length === 0) return { error: 'No items to submit' };
+
+    const lastRow = sheet.getLastRow();
+    const startRow = lastRow + 1;
+
+    sheet.getRange(startRow, 1, rows.length, 11).setValues(rows);
+
+    // Format the date column
+    sheet.getRange(startRow, 2, rows.length, 1).setNumberFormat('yyyy-MM-dd');
+    // Format currency columns
+    sheet.getRange(startRow, 8, rows.length, 1).setNumberFormat('$#,##0.00');
+    sheet.getRange(startRow, 9, rows.length, 1).setNumberFormat('$#,##0.00');
+
+    return {
+      success: true,
+      invoiceNo: data.invoiceNo,
+      itemCount: rows.length,
+      total: rows.reduce((sum, r) => sum + r[8], 0),
+      entryTime: entryTimeStr,
+      writtenToRow: startRow
+    };
+  } catch (error) {
+    return { error: 'Failed to write to sheet: ' + error.toString() };
+  }
+}
+
+// ── SUBMIT STOCK IN ──
+// Expects: { refNo, date, productId, productName, qty, supplier, costPerUnit, receivedBy, remarks }
+function submitStockIn(data) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_STOCK_IN);
+  const lastRow = sheet.getLastRow();
+
+  const row = [
+    data.refNo,
+    new Date(data.date),
+    data.productId,
+    data.productName,
+    data.qty,
+    data.supplier,
+    data.costPerUnit,
+    data.qty * data.costPerUnit, // Total Cost
+    data.receivedBy,
+    data.remarks || ''
+  ];
+
+  sheet.getRange(lastRow + 1, 1, 1, 10).setValues([row]);
+  sheet.getRange(lastRow + 1, 2, 1, 1).setNumberFormat('yyyy-MM-dd');
+  sheet.getRange(lastRow + 1, 7, 1, 1).setNumberFormat('$#,##0.00');
+  sheet.getRange(lastRow + 1, 8, 1, 1).setNumberFormat('$#,##0.00');
+
+  return { success: true, refNo: data.refNo };
+}
+
+// ── GET DASHBOARD DATA ──
+function getDashboard() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Get products
+  const prodSheet = ss.getSheetByName(SHEET_PRODUCTS);
+  const prodLastRow = prodSheet.getLastRow();
+  const products = prodLastRow >= DATA_START_ROW
+    ? prodSheet.getRange(DATA_START_ROW, 1, prodLastRow - DATA_START_ROW + 1, 9).getValues()
+    : [];
+
+  // Get stock in
+  const siSheet = ss.getSheetByName(SHEET_STOCK_IN);
+  const siLastRow = siSheet.getLastRow();
+  const stockIn = siLastRow >= DATA_START_ROW
+    ? siSheet.getRange(DATA_START_ROW, 1, siLastRow - DATA_START_ROW + 1, 10).getValues()
+    : [];
+
+  // Get sales
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  const salesLastRow = salesSheet.getLastRow();
+  const sales = salesLastRow >= DATA_START_ROW
+    ? salesSheet.getRange(DATA_START_ROW, 1, salesLastRow - DATA_START_ROW + 1, 11).getValues()
+    : [];
+
+  // Calculate stock per product
+  const stockMap = {};
+
+  products.forEach(row => {
+    if (row[0] === '' || row[8] === 'No') return;
+    stockMap[row[0]] = {
+      id: row[0],
+      name: row[1],
+      sku: row[2],
+      category: row[3],
+      unit: row[4],
+      unitCost: row[5],
+      sellingPrice: row[6],
+      reorderLevel: row[7],
+      totalIn: 0,
+      totalOut: 0,
+      onHand: 0,
+      status: 'OK'
+    };
+  });
+
+  stockIn.forEach(row => {
+    const pid = row[2]; // Product ID column
+    if (stockMap[pid]) {
+      stockMap[pid].totalIn += (row[4] || 0); // Qty column
+    }
+  });
+
+  sales.forEach(row => {
+    const pid = row[4]; // Product ID column
+    if (stockMap[pid]) {
+      stockMap[pid].totalOut += (row[6] || 0); // Qty column
+    }
+  });
+
+  const dashboard = Object.values(stockMap).map(p => {
+    p.onHand = p.totalIn - p.totalOut;
+    p.status = p.onHand <= p.reorderLevel ? 'LOW' : 'OK';
+    return p;
+  });
+
+  // Summary KPIs
+  const totalRevenue = sales.reduce((sum, row) => sum + (row[8] || 0), 0);
+  const uniqueInvoices = [...new Set(sales.filter(r => r[0] !== '').map(r => r[0]))].length;
+  const lowStockCount = dashboard.filter(p => p.status === 'LOW').length;
+
+  return {
+    items: dashboard,
+    kpi: {
+      totalSKUs: dashboard.length,
+      totalOnHand: dashboard.reduce((sum, p) => sum + p.onHand, 0),
+      lowStockCount,
+      totalRevenue,
+      totalInvoices: uniqueInvoices,
+      inventoryValue: dashboard.reduce((sum, p) => sum + (p.onHand * p.unitCost), 0)
+    }
+  };
+}
+
+// ── GET RECENT SALES ──
+function getRecentSales() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_SALES);
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < DATA_START_ROW) return { sales: [] };
+
+  const data = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 11).getValues();
+
+  // Group by invoice
+  const invoiceMap = {};
+  data.forEach(row => {
+    if (row[0] === '') return;
+    const inv = row[0];
+    if (!invoiceMap[inv]) {
+      invoiceMap[inv] = {
+        invoiceNo: inv,
+        date: row[1] instanceof Date ? Utilities.formatDate(row[1], Session.getScriptTimeZone(), 'yyyy-MM-dd') : row[1],
+        customer: row[2],
+        salesperson: row[3],
+        items: [],
+        total: 0
+      };
+    }
+    invoiceMap[inv].items.push({
+      productId: row[4],
+      productName: row[5],
+      qty: row[6],
+      unitPrice: row[7],
+      lineTotal: row[8]
+    });
+    invoiceMap[inv].total += (row[8] || 0);
+  });
+
+  // Sort by date descending, return last 20
+  const invoices = Object.values(invoiceMap)
+    .sort((a, b) => b.date > a.date ? 1 : -1)
+    .slice(0, 20);
+
+  return { sales: invoices };
+}
